@@ -24,6 +24,13 @@ export const UNAUTHORIZED_STATUSES = [401, 403];
 // Image Dimensions
 export const IMAGE_RENDER_DIMENSION = 1024;
 
+/**
+ * Độ phân giải output cho 3D generation (cạnh vuông).
+ * - Puter AI với Gemini: chỉ hỗ trợ ratio { w: 1024, h: 1024 } (docs.puter.com).
+ * - Nếu sau này Puter hỗ trợ ratio lớn hơn (vd. Gemini 3 Pro 2K/4K), tăng giá trị này và cập nhật THREE_D_MODEL_CONFIGS trong lib/ai.action.ts.
+ */
+export const IMAGE_3D_RENDER_DIMENSION = 1024;
+
 export const ROOMIFY_RENDER_PROMPT = `
 TASK: Convert the input 2D floor plan into a **photorealistic, top‑down 3D architectural render**.
 

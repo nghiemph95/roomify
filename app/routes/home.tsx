@@ -203,7 +203,7 @@ export default function Home() {
   };
 
   return (
-    <div className="flex flex-col items-center justify-center h-screen">
+    <div className="flex flex-col items-center min-h-screen pb-14">
       <Navbar />
 
       <section className="hero">
@@ -323,6 +323,16 @@ export default function Home() {
           </div>
         </div>
       </section>
+
+      <footer className="fixed bottom-0 left-0 right-0 py-3 px-4 w-full border-t border-zinc-100 bg-background/95 backdrop-blur-sm z-10">
+        <div className="max-w-5xl mx-auto flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11px] text-zinc-400">
+          <span>
+            React · React Router · Tailwind · TypeScript · Puter (Auth · KV · AI · FS · Hosting)
+          </span>
+          <span className="text-zinc-300">·</span>
+          <span>Created by Nghiem Pham</span>
+        </div>
+      </footer>
     </div>
   );
 }
