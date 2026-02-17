@@ -275,6 +275,18 @@
     }
   }
 
+  .image-container {
+    @apply w-full p-6;
+
+    h2 {
+      @apply text-xl font-serif font-bold text-black mb-4;
+    }
+
+    img {
+      @apply w-full max-w-full h-auto object-contain rounded-lg shadow-lg;
+    }
+  }
+
   .visualizer {
     @apply min-h-screen bg-background pt-6 pb-10 px-4 md:px-6 flex flex-col items-center font-sans relative;
 
@@ -344,10 +356,11 @@
       }
 
       .render-area {
-        @apply relative bg-zinc-100 min-h-105;
+        @apply relative bg-zinc-100 min-h-[600px] flex items-center justify-center p-6;
 
         .render-img {
-          @apply w-full h-full object-contain transition-all duration-700 opacity-100 scale-100;
+          @apply max-w-full max-h-[80vh] w-auto h-auto object-contain transition-all duration-700 opacity-100 scale-100 rounded-lg shadow-lg;
+          display: block;
         }
 
         &.is-processing {
