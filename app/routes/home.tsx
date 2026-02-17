@@ -1,7 +1,9 @@
 import type { Route } from './+types/home';
 import Navbar from '../../components/Navbar';
-import { ArrowRightIcon, Layers } from 'lucide-react';
+import { ArrowRightIcon, ArrowUpRight, Clock, Layers } from 'lucide-react';
 import { Button } from 'components/ui/Button';
+import { useOutletContext, useNavigate } from 'react-router';
+import Upload from '../../components/Upload';
 
 export function meta({ }: Route.MetaArgs) {
   return [
@@ -10,7 +12,22 @@ export function meta({ }: Route.MetaArgs) {
   ];
 }
 
+type AuthContext = {
+  isSignedIn: boolean;
+  userName: string | null;
+  userId: string | null;
+};
+
 export default function Home() {
+  const { isSignedIn } = useOutletContext<AuthContext>();
+  const navigate = useNavigate();
+
+  const handleUploadComplete = (base64: string) => {
+    const newId = Date.now().toString();
+    navigate(`/visualizer/${newId}`);
+    return true;
+  };
+
   return (
     <div className="flex flex-col items-center justify-center h-screen">
       <Navbar />
@@ -52,9 +69,9 @@ export default function Home() {
 
               <h3>Upload your floor plan</h3>
               <p>Supports JPG, PNG, formats up to 10MB</p>
-
             </div>
-            <p>Upload images</p>
+
+            <Upload isSignedIn={isSignedIn} onComplete={handleUploadComplete} />
           </div>
         </div>
       </section>
@@ -71,11 +88,27 @@ export default function Home() {
           <div className="projects-grid">
             <div className="project-card group">
               <div className="preview">
-                <img src="https://roomify-mlhuk267-dfwu1i.puter.site/projects/1770803585402/rendered.png" />
+                <img src="https://roomify-mlhuk267-dfwu1i.puter.site/projects/1770803585402/rendered.png" alt="Project" />
+
+                <div className="badge">
+                  <span>Community</span>
+                </div>
               </div>
+
+              <div className=" card-body">
+                <div>
+                  <h3>Project Manhattan</h3>
+                  < div className="meta">
+                    <Clock size={12} />
+                    <span>{new Date('01.01.2027').toLocaleDateString()}</span>
+                    <span>By Nghiem Pham</span>
+                  </div>
+                </div>
+                <div className='arrow'><ArrowUpRight size={18} /></div>
+              </div>
+
             </div>
           </div>
-
         </div>
       </section>
     </div>
