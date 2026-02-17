@@ -1,0 +1,22 @@
+# Dependencies
+node_modules
+
+# Build output
+build
+dist
+.react-router
+
+# Lock files
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+bun.lockb
+
+# Generated
+*.min.js
+*.min.css
+
+# Misc
+.env
+.env.*
+.DS_Store
