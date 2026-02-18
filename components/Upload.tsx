@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback } from 'react';
-import { Upload as UploadIcon } from 'lucide-react';
+import { Upload as UploadIcon, Loader2 } from 'lucide-react';
 import {
   PROGRESS_INTERVAL_MS,
   PROGRESS_STEP,
@@ -8,7 +8,7 @@ import {
 
 interface UploadProps {
   isSignedIn: boolean;
-  onComplete: (base64: string) => void;
+  onComplete: (base64: string) => void | Promise<boolean | void>;
 }
 
 export default function Upload({ isSignedIn, onComplete }: UploadProps) {
@@ -43,12 +43,19 @@ export default function Upload({ isSignedIn, onComplete }: UploadProps) {
               clearInterval(progressIntervalRef.current);
               progressIntervalRef.current = null;
             }
+            setProgress(100);
 
-            // Call onComplete after REDIRECT_DELAY_MS
-            setTimeout(() => {
-              onComplete(base64String);
-              setIsProcessing(false);
-              setProgress(0);
+            // Sau khi progress 100%: đợi REDIRECT_DELAY_MS rồi gọi onComplete, giữ Loading đến khi xong
+            setTimeout(async () => {
+              try {
+                const result = onComplete(base64String);
+                if (result && typeof (result as Promise<unknown>).then === 'function') {
+                  await (result as Promise<boolean | void>);
+                }
+              } finally {
+                setIsProcessing(false);
+                setProgress(0);
+              }
             }, REDIRECT_DELAY_MS);
           }
         }, PROGRESS_INTERVAL_MS);
@@ -111,12 +118,6 @@ export default function Upload({ isSignedIn, onComplete }: UploadProps) {
     setIsDragging(false);
   }, []);
 
-  const handleClick = useCallback(() => {
-    if (isSignedIn && fileInputRef.current) {
-      fileInputRef.current.click();
-    }
-  }, [isSignedIn]);
-
   return (
     <div className="upload">
       {!isProcessing ? (
@@ -125,7 +126,6 @@ export default function Upload({ isSignedIn, onComplete }: UploadProps) {
           onDrop={handleDrop}
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
-          onClick={handleClick}
         >
           <input
             ref={fileInputRef}
@@ -150,17 +150,31 @@ export default function Upload({ isSignedIn, onComplete }: UploadProps) {
       ) : (
         <div className="upload-status">
           <div className="status-content">
-            <div className="status-icon">
-              <UploadIcon className="w-6 h-6" />
-            </div>
-            <p className="status-text">Processing...</p>
-            <div className="progress-bar">
-              <div
-                className="progress-fill"
-                style={{ width: `${progress}%` }}
-              />
-            </div>
-            <span className="progress-text">{progress}%</span>
+            {progress < 100 ? (
+              <>
+                <div className="status-icon">
+                  <UploadIcon className="w-6 h-6" />
+                </div>
+                <p className="status-text">Processing...</p>
+                <div className="progress-bar">
+                  <div
+                    className="progress-fill"
+                    style={{ width: `${progress}%` }}
+                  />
+                </div>
+                <span className="progress-text">{progress}%</span>
+              </>
+            ) : (
+              <>
+                <div className="status-icon">
+                  <Loader2 className="w-6 h-6 animate-spin text-primary" />
+                </div>
+                <p className="status-text">Loading...</p>
+                <p className="text-zinc-500 text-xs mt-1">
+                  Creating project and redirecting...
+                </p>
+              </>
+            )}
           </div>
         </div>
       )}

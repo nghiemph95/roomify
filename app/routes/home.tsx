@@ -3,10 +3,9 @@ import Navbar from '../../components/Navbar';
 import { ArrowRightIcon, ArrowUpRight, Clock, Layers } from 'lucide-react';
 import { Button } from 'components/ui/Button';
 import { useOutletContext, useNavigate } from 'react-router';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import Upload from '../../components/Upload';
-import { createProject } from '../../lib/puter.action';
-import puter from '@heyputer/puter.js';
+import { createProject, getProjects } from '../../lib/puter.action';
 
 export function meta({ }: Route.MetaArgs) {
   return [
@@ -29,10 +28,11 @@ export default function Home() {
   const [projets, setProjets] = useState<DesignItem[]>([]);
   // Loading state để hiển thị loading indicator khi đang load projects
   const [isLoadingProjects, setIsLoadingProjects] = useState(false);
+  // Ref đánh dấu đang trong quá trình tạo project (upload + createProject + navigate)
+  const isCreatingProjectRef = useRef(false);
 
   /**
-   * Load projects từ KV store
-   * Tìm tất cả keys có prefix "project:" và load values
+   * Load projects từ Puter Worker (cùng nguồn với createProject).
    */
   const loadProjects = async () => {
     if (!isSignedIn) {
@@ -42,50 +42,9 @@ export default function Home() {
 
     setIsLoadingProjects(true);
     try {
-      // List tất cả keys có prefix "project:"
-      // Pattern "project:*" sẽ match tất cả keys bắt đầu với "project:"
-      const keysResult = (await puter.kv.list('project:*')) as
-        | string[]
-        | { keys?: string[]; cursor?: string }
-        | Record<string, unknown>;
-
-      // puter.kv.list() có thể trả về:
-      // - Array of strings (keys only)
-      // - Object với keys và values
-      // - Object với pagination (cursor, keys, values)
-      let keys: string[] = [];
-
-      if (Array.isArray(keysResult)) {
-        // Nếu là array → đó là list of keys
-        keys = keysResult;
-      } else if (keysResult && typeof keysResult === 'object') {
-        // Nếu là object → có thể có keys property hoặc là key-value pairs
-        if ('keys' in keysResult && Array.isArray(keysResult.keys)) {
-          keys = keysResult.keys;
-        } else {
-          // Nếu là object với keys là properties
-          keys = Object.keys(keysResult);
-        }
-      }
-
-      // Load values cho từng key
-      const projectsPromises = keys.map(async (key) => {
-        try {
-          const project = await puter.kv.get(key);
-          return project as DesignItem;
-        } catch (error) {
-          console.warn(`Failed to load project ${key}:`, error);
-          return null;
-        }
-      });
-
-      const projects = await Promise.all(projectsPromises);
-      // Filter out null values và sort theo timestamp (mới nhất trước)
-      const validProjects = projects
-        .filter((p): p is DesignItem => p !== null)
-        .sort((a, b) => b.timestamp - a.timestamp);
-
-      setProjets(validProjects);
+      const projects = await getProjects();
+      const sorted = [...projects].sort((a, b) => b.timestamp - a.timestamp);
+      setProjets(sorted);
     } catch (error) {
       console.error('Failed to load projects:', error);
       setProjets([]);
@@ -117,89 +76,67 @@ export default function Home() {
   const handleUploadComplete = async (
     base64Image: string
   ): Promise<boolean> => {
-    // BƯỚC 1: Tạo projectId mới
-    // Sử dụng timestamp để đảm bảo unique ID
-    const newId = Date.now().toString();
+    isCreatingProjectRef.current = true;
+    try {
+      // BƯỚC 1: Tạo projectId mới
+      const newId = Date.now().toString();
+      const name = `Residence ${newId}`;
 
-    // BƯỚC 2: Tạo tên project mặc định
-    // Format: "Residence {newId}" để dễ nhận biết
-    // Ví dụ: "Residence 1737123456789"
-    const name = `Residence ${newId}`;
+      // BƯỚC 2: Tạo newItem với đầy đủ DesignItem fields
+      const newItem: DesignItem = {
+        id: newId,
+        name,
+        sourceImage: base64Image,
+        renderedImage: undefined,
+        timestamp: Date.now(),
+        ownerId: userId || null,
+        sourcePath: null,
+        renderedPath: null,
+        publicPath: null,
+        isPublic: false,
+      };
 
-    // BƯỚC 3: Tạo newItem với đầy đủ DesignItem fields
-    // DesignItem cần: id, name, sourceImage, timestamp, và các fields optional khác
-    const newItem: DesignItem = {
-      id: newId,
-      name, // Tên project mặc định
-      sourceImage: base64Image, // Base64 image từ upload
-      renderedImage: undefined, // Rendered image (sẽ được set sau khi render)
-      timestamp: Date.now(), // Timestamp hiện tại
-      ownerId: userId || null, // User ID từ auth context (nếu có)
-      sourcePath: null, // Path trong storage (không cần khi dùng hosting)
-      renderedPath: null, // Path trong storage (không cần khi dùng hosting)
-      publicPath: null, // Public path (không cần khi dùng hosting)
-      isPublic: false, // Mặc định là private
-    };
+      // BƯỚC 3: Gọi createProject để upload images và lưu project
+      const saved = await createProject({
+        item: newItem,
+        visibility: 'private',
+      });
 
-    // BƯỚC 3: Gọi createProject để upload images và lưu project
-    // createProject() sẽ:
-    // - Upload sourceImage lên hosting subdomain
-    // - Upload renderedImage nếu có (trong trường hợp này là null)
-    // - Resolve URLs thành hosted URLs
-    // - Lưu project vào KV store với key: "project:{newId}"
-    // - Return DesignItem với resolved URLs hoặc null nếu fail
-    const saved = await createProject({
-      item: newItem,
-      visibility: 'private',
-    });
-
-    // BƯỚC 4: Kiểm tra kết quả
-    // Nếu createProject return null → có lỗi xảy ra
-    // → Log error và return false để Upload component biết có lỗi
-    if (!saved) {
-      console.error('Failed to create project');
-      return false;
-    }
-
-    // BƯỚC 5: Verify image URL có thể access được (optional)
-    // Đợi một chút để đảm bảo file đã được upload và sẵn sàng serve
-    if (saved.sourceImage) {
-      try {
-        const response = await fetch(saved.sourceImage, { method: 'HEAD' });
-        if (!response.ok) {
-          console.warn('Image URL may not be ready yet:', saved.sourceImage);
-        }
-      } catch (err) {
-        console.warn('Could not verify image URL:', err);
-        // Vẫn tiếp tục navigate dù không verify được
+      if (!saved) {
+        console.error('Failed to create project');
+        return false;
       }
+
+      // BƯỚC 4: Verify image URL (optional)
+      if (saved.sourceImage) {
+        try {
+          const response = await fetch(saved.sourceImage, { method: 'HEAD' });
+          if (!response.ok) {
+            console.warn('Image URL may not be ready yet:', saved.sourceImage);
+          }
+        } catch (err) {
+          console.warn('Could not verify image URL:', err);
+        }
+      }
+
+      // BƯỚC 5: Update state và reload projects
+      setProjets((prev) => [saved, ...prev]);
+      await loadProjects();
+
+      // BƯỚC 6: Navigate đến visualizer
+      navigate(`/visualizer/${newId}`, {
+        state: {
+          initialImage: saved.sourceImage,
+          initialRendered: saved.renderedImage || null,
+          name: saved.name || null,
+          ownerId: saved.ownerId || null,
+        },
+      });
+
+      return true;
+    } finally {
+      isCreatingProjectRef.current = false;
     }
-
-    // BƯỚC 6: Update state với project mới
-    // Thêm saved project vào đầu danh sách projets
-    // Dùng functional update để đảm bảo state được update đúng
-    // saved đã có resolved URLs (hosted URLs) từ createProject
-    setProjets((prev) => [saved, ...prev]);
-    
-    // Reload projects từ KV store để đảm bảo sync với database
-    // (Optional: có thể bỏ qua nếu muốn chỉ dùng local state)
-    await loadProjects();
-
-    // BƯỚC 7: Navigate đến visualizer với project data
-    // Navigate với:
-    // - Path: /visualizer/{newId} (projectId)
-    // - State: initialImage, initialRendered, name để visualizer có thể load data
-    navigate(`/visualizer/${newId}`, {
-      state: {
-        initialImage: saved.sourceImage, // Hosted URL của source image
-        initialRendered: saved.renderedImage || null, // Hosted URL của rendered image (nếu có)
-        name: saved.name || null, // Tên project
-        ownerId: saved.ownerId || null, // Owner ID
-      },
-    });
-
-    // Return true để Upload component biết thành công
-    return true;
   };
 
   return (
@@ -289,7 +226,11 @@ export default function Home() {
                 >
                   <div className="preview">
                     <img
-                      src={project.renderedImage || project.sourceImage}
+                      src={
+                        project.image3D ||
+                        project.renderedImage ||
+                        project.sourceImage
+                      }
                       alt={project.name || 'Project'}
                     />
 

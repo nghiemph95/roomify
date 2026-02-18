@@ -14,6 +14,8 @@ import {
 } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import puter from '@heyputer/puter.js';
+import { getProject, updateProject } from '../../lib/puter.action';
+import { getOrCreateHostingConfig, uploadImageToHosting } from '../../lib/puter.hosting';
 import { generate3DView } from '../../lib/ai.action';
 
 export function meta({ params }: Route.MetaArgs) {
@@ -54,6 +56,7 @@ export default function Visualizer() {
 
   // State để quản lý 3D view generation
   const [image3D, setImage3D] = useState<HTMLImageElement | null>(null);
+  const [isLoadingSaved3D, setIsLoadingSaved3D] = useState(false);
   const [isGenerating3D, setIsGenerating3D] = useState(false);
   const [error3D, setError3D] = useState<string | null>(null);
 
@@ -86,19 +89,25 @@ export default function Visualizer() {
       setError(null);
 
       try {
-        // BƯỚC 1: Thử lấy từ location state (nếu navigate từ home)
-        // Location state có thể chứa: initialImage, initialRendered, name, ownerId
-        const state = location.state as any;
+        // Ưu tiên load từ server (getProject) để có đủ image3D → tránh render lại 3D tốn credit
+        if (puter.auth.isSignedIn()) {
+          const projectData = await getProject(id);
 
-        // Check cả state.initialImage và state.state?.initialImage (React Router v7 có thể nest state)
+          if (projectData) {
+            setProject(projectData);
+            setIsLoading(false);
+            return;
+          }
+        }
+
+        // Fallback: dùng location state khi chưa đăng nhập hoặc project chưa có trên server (vd. vừa upload)
+        const state = location.state as any;
         const initialImage = state?.initialImage || state?.state?.initialImage;
         const initialRendered = state?.initialRendered || state?.state?.initialRendered;
         const name = state?.name || state?.state?.name;
         const ownerId = state?.ownerId || state?.state?.ownerId;
 
         if (initialImage) {
-          // Nếu có state → tạo project object từ state
-          // Đây là trường hợp navigate từ home sau khi upload
           const projectFromState: DesignItem = {
             id,
             name: name || null,
@@ -112,24 +121,10 @@ export default function Visualizer() {
             isPublic: false,
           };
           setProject(projectFromState);
-          setIsLoading(false);
-          return;
-        }
-
-        // BƯỚC 2: Nếu không có state → load từ KV store
-        // Key format: "project:{id}"
-        if (puter.auth.isSignedIn()) {
-          const projectKey = `project:${id}`;
-          const projectData = await puter.kv.get(projectKey);
-
-          if (projectData) {
-            const project = projectData as DesignItem;
-            setProject(project);
-          } else {
-            setError('Project not found');
-          }
-        } else {
+        } else if (!puter.auth.isSignedIn()) {
           setError('Please sign in to view projects');
+        } else {
+          setError('Project not found');
         }
       } catch (err) {
         console.error('Failed to load project:', err);
@@ -142,25 +137,52 @@ export default function Visualizer() {
     loadProject();
   }, [id, location.state]);
 
-  // Generate 3D view khi project được load
+  // Nếu project đã có image3D (đã lưu trước đó) → load lên state, không cần generate lại
   useEffect(() => {
-    // Chỉ generate nếu:
-    // - Project đã được load
-    // - Có sourceImage
-    // - Chưa có 3D image
-    // - Không đang generate
+    if (!project?.image3D || image3D) {
+      if (!project?.image3D) setIsLoadingSaved3D(false);
+      return;
+    }
+
+    let cancelled = false;
+    setIsLoadingSaved3D(true);
+    setError3D(null);
+
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      if (!cancelled) {
+        setImage3D(img);
+        setIsLoadingSaved3D(false);
+      }
+    };
+    img.onerror = () => {
+      if (!cancelled) {
+        console.warn('Failed to load saved image3D URL:', project.image3D);
+        setIsLoadingSaved3D(false);
+        setError3D('Could not load saved 3D view. You can regenerate.');
+      }
+    };
+    img.src = project.image3D;
+
+    return () => {
+      cancelled = true;
+    };
+  }, [project?.id, project?.image3D, image3D]);
+
+  // Generate 3D view khi project được load và chưa có 3D (chưa có state và chưa có URL đã lưu)
+  useEffect(() => {
     if (
       project?.sourceImage &&
       !isLoading &&
       !image3D &&
+      !project?.image3D &&
       !isGenerating3D
     ) {
       const generate3D = async () => {
         setIsGenerating3D(true);
         setError3D(null);
 
-        // Timeout an toàn: nếu Puter show modal (vd. Low Balance) và promise không resolve/reject,
-        // sau 90s ép tắt loading để user có thể đóng modal / dùng lại UI
         const timeoutMs = 90_000;
         const timeoutId = setTimeout(() => {
           setIsGenerating3D(false);
@@ -172,6 +194,19 @@ export default function Visualizer() {
             testMode: true, // true = không trừ credits (ảnh mẫu)
           });
           setImage3D(generatedImage);
+
+          // Lưu ảnh 3D lên hosting và cập nhật project để lần sau không phải generate lại
+          const hosting = await getOrCreateHostingConfig();
+          const hosted = await uploadImageToHosting({
+            hosting,
+            url: generatedImage.src,
+            projectId: project.id,
+            label: 'image3d',
+          });
+          if (hosted?.url) {
+            const updated = await updateProject({ ...project, image3D: hosted.url });
+            if (updated) setProject(updated);
+          }
         } catch (err) {
           const errorMessage =
             err instanceof Error ? err.message : 'Failed to generate 3D view';
@@ -199,9 +234,13 @@ export default function Visualizer() {
     };
   }, []);
 
-  // Zoom bằng con lăn chuột khi hover lên vùng 2D/3D (không cần giữ Ctrl/Cmd)
+  // Zoom bằng con lăn chuột khi hover lên vùng 2D/3D (chỉ trong Split View; Single View không zoom)
   useEffect(() => {
     const handleWheel = (e: WheelEvent, type: '2d' | '3d') => {
+      if (viewMode === 'single') {
+        e.preventDefault();
+        return;
+      }
       e.preventDefault();
       const delta = e.deltaY > 0 ? -0.1 : 0.1;
       if (type === '2d') {
@@ -223,10 +262,14 @@ export default function Visualizer() {
       el2D.addEventListener('wheel', wheelHandler, { passive: false });
       return () => el2D.removeEventListener('wheel', wheelHandler);
     }
-  }, [project, image3D]); // Re-attach khi view có ảnh 2D đã render
+  }, [project, image3D, viewMode]);
 
   useEffect(() => {
     const handleWheel = (e: WheelEvent, type: '2d' | '3d') => {
+      if (viewMode === 'single') {
+        e.preventDefault();
+        return;
+      }
       e.preventDefault();
       const delta = e.deltaY > 0 ? -0.1 : 0.1;
       if (type === '3d') {
@@ -243,7 +286,7 @@ export default function Visualizer() {
       el3D.addEventListener('wheel', wheelHandler, { passive: false });
       return () => el3D.removeEventListener('wheel', wheelHandler);
     }
-  }, [image3D]); // Re-attach khi view có ảnh 3D đã render
+  }, [image3D, viewMode]);
 
   // Handle export action
   const handleExport = () => {
@@ -328,6 +371,19 @@ export default function Visualizer() {
       setImage3D(generatedImage);
       setZoom3D(1);
       setPan3D({ x: 0, y: 0 });
+
+      // Lưu ảnh 3D lên hosting và cập nhật project (giống auto-generate)
+      const hosting = await getOrCreateHostingConfig();
+      const hosted = await uploadImageToHosting({
+        hosting,
+        url: generatedImage.src,
+        projectId: project.id,
+        label: 'image3d',
+      });
+      if (hosted?.url) {
+        const updated = await updateProject({ ...project, image3D: hosted.url });
+        if (updated) setProject(updated);
+      }
     } catch (err) {
       const errorMessage =
         err instanceof Error ? err.message : 'Failed to generate 3D view';
@@ -531,9 +587,16 @@ export default function Visualizer() {
                 <Button
                   variant="ghost"
                   size="md"
-                  onClick={() =>
-                    setViewMode((prev) => (prev === 'split' ? 'single' : 'split'))
-                  }
+                  onClick={() => {
+                    const next = viewMode === 'split' ? 'single' : 'split';
+                    setViewMode(next);
+                    if (next === 'single') {
+                      setZoom2D(1);
+                      setZoom3D(1);
+                      setPan2D({ x: 0, y: 0 });
+                      setPan3D({ x: 0, y: 0 });
+                    }
+                  }}
                   title="Toggle view mode"
                 >
                   {viewMode === 'split' ? 'Single View' : 'Split View'}
@@ -589,173 +652,211 @@ export default function Visualizer() {
                   return (
                     <div
                       style={{
-                        position: 'relative',
-                        width: '100%',
-                        height: '100%',
+                        position: 'absolute',
+                        inset: 0,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
                         overflow: 'hidden',
+                        background: 'var(--color-surface-highlight, #f3f4f6)',
                       }}
                     >
-                      {/* 2D Image (background) */}
-                      <div
-                        ref={image2DRef}
-                        style={{
-                          position: 'absolute',
-                          inset: 0,
-                          overflow: 'hidden',
-                          cursor: isDragging2D ? 'grabbing' : 'grab',
-                          userSelect: 'none',
-                          WebkitUserSelect: 'none',
-                        }}
-                        onMouseDown={(e) => handleMouseDown('2d', e)}
-                        onDragStart={(e) => e.preventDefault()}
-                      >
-                        <img
-                          src={sourceImageUrl}
-                          alt={`2D floor plan of ${project.name || 'project'}`}
-                          className="render-img"
-                          draggable={false}
-                          style={{
-                            transform: `translate(${pan2D.x}px, ${pan2D.y}px) scale(${zoom2D})`,
-                            transformOrigin: 'center center',
-                            transition: isDragging2D ? 'none' : 'transform 0.2s',
-                            height: '100%',
-                            objectFit: 'contain',
-                            userSelect: 'none',
-                            WebkitUserSelect: 'none',
-                            pointerEvents: 'none', // Prevent image from capturing mouse events
-                          }}
-                          onError={(e) => {
-                            console.error('Failed to load 2D image');
-                            const img = e.currentTarget;
-                            img.style.border = '2px solid red';
-                            img.style.opacity = '0.5';
-                          }}
-                          onDragStart={(e) => e.preventDefault()}
-                        />
-                      </div>
-
-                      {/* 3D Image (overlay với clip-path) */}
-                      <div
-                        ref={image3DRef}
-                        style={{
-                          position: 'absolute',
-                          inset: 0,
-                          overflow: 'hidden',
-                          clipPath: `inset(0 ${100 - comparisonSlider}% 0 0)`,
-                          cursor: isDragging3D ? 'grabbing' : 'grab',
-                          userSelect: 'none',
-                          WebkitUserSelect: 'none',
-                        }}
-                        onMouseDown={(e) => handleMouseDown('3d', e)}
-                        onDragStart={(e) => e.preventDefault()}
-                      >
-                        <img
-                          src={image3D.src}
-                          alt={`3D view of ${project.name || 'floor plan'}`}
-                          className="render-img"
-                          draggable={false}
-                          style={{
-                            transform: `translate(${pan3D.x}px, ${pan3D.y}px) scale(${zoom3D})`,
-                            transformOrigin: 'center center',
-                            transition: isDragging3D ? 'none' : 'transform 0.2s',
-                            height: '100%',
-                            objectFit: 'contain',
-                            userSelect: 'none',
-                            WebkitUserSelect: 'none',
-                            pointerEvents: 'none', // Prevent image from capturing mouse events
-                          }}
-                          onError={(e) => {
-                            console.error('Failed to load 3D image');
-                            e.currentTarget.style.display = 'none';
-                          }}
-                          onDragStart={(e) => e.preventDefault()}
-                        />
-                      </div>
-
-                      {/* Comparison Slider */}
+                      {/* Khung chung: vuông, căn giữa, 2D và 3D cùng tỉ lệ trong khung này */}
                       <div
                         style={{
-                          position: 'absolute',
-                          top: '50%',
-                          left: `${comparisonSlider}%`,
-                          transform: 'translate(-50%, -50%)',
-                          width: '4px',
-                          height: '80%',
-                          background: 'rgba(255, 255, 255, 0.9)',
-                          cursor: 'ew-resize',
-                          zIndex: 10,
-                          boxShadow: '0 0 10px rgba(0,0,0,0.3)',
-                        }}
-                        onMouseDown={(e) => {
-                          e.preventDefault();
-                          const handleMove = (moveEvent: MouseEvent) => {
-                            const rect = (e.currentTarget.parentElement as HTMLElement)?.getBoundingClientRect();
-                            if (rect) {
-                              const percent = ((moveEvent.clientX - rect.left) / rect.width) * 100;
-                              setComparisonSlider(Math.max(0, Math.min(100, percent)));
-                            }
-                          };
-                          const handleUp = () => {
-                            document.removeEventListener('mousemove', handleMove);
-                            document.removeEventListener('mouseup', handleUp);
-                          };
-                          document.addEventListener('mousemove', handleMove);
-                          document.addEventListener('mouseup', handleUp);
+                          position: 'relative',
+                          width: 'min(100%, 80vmin)',
+                          aspectRatio: '1',
+                          maxHeight: '100%',
+                          flexShrink: 0,
                         }}
                       >
+                        {/* 2D Image (background) - cùng khung */}
                         <div
+                          ref={image2DRef}
                           style={{
                             position: 'absolute',
-                            top: '50%',
-                            left: '50%',
-                            transform: 'translate(-50%, -50%)',
-                            width: '40px',
-                            height: '40px',
-                            borderRadius: '50%',
-                            background: 'white',
-                            border: '2px solid rgba(0,0,0,0.2)',
+                            inset: 0,
+                            overflow: 'hidden',
+                            cursor: isDragging2D ? 'grabbing' : 'grab',
+                            userSelect: 'none',
+                            WebkitUserSelect: 'none',
+                            borderRadius: '8px',
+                          }}
+                          onMouseDown={(e) => handleMouseDown('2d', e)}
+                          onDragStart={(e) => e.preventDefault()}
+                        >
+                          <img
+                            src={sourceImageUrl}
+                            alt={`2D floor plan of ${project.name || 'project'}`}
+                            draggable={false}
+                            style={{
+                              transform: `translate(${pan2D.x}px, ${pan2D.y}px) scale(${zoom2D})`,
+                              transformOrigin: 'center center',
+                              transition: isDragging2D ? 'none' : 'transform 0.2s',
+                              width: '100%',
+                              height: '100%',
+                              objectFit: 'contain',
+                              objectPosition: 'center',
+                              userSelect: 'none',
+                              WebkitUserSelect: 'none',
+                              pointerEvents: 'none',
+                            }}
+                            onError={(e) => {
+                              console.error('Failed to load 2D image');
+                              const img = e.currentTarget;
+                              img.style.border = '2px solid red';
+                              img.style.opacity = '0.5';
+                            }}
+                            onDragStart={(e) => e.preventDefault()}
+                          />
+                        </div>
+
+                        {/* 3D Image (overlay, cùng khung, clip theo slider) */}
+                        <div
+                          ref={image3DRef}
+                          style={{
+                            position: 'absolute',
+                            inset: 0,
+                            overflow: 'hidden',
+                            clipPath: `inset(0 ${100 - comparisonSlider}% 0 0)`,
+                            cursor: isDragging3D ? 'grabbing' : 'grab',
+                            userSelect: 'none',
+                            WebkitUserSelect: 'none',
+                            borderRadius: '8px',
+                          }}
+                          onMouseDown={(e) => handleMouseDown('3d', e)}
+                          onDragStart={(e) => e.preventDefault()}
+                        >
+                          <img
+                            src={image3D.src}
+                            alt={`3D view of ${project.name || 'floor plan'}`}
+                            draggable={false}
+                            style={{
+                              transform: `translate(${pan3D.x}px, ${pan3D.y}px) scale(${zoom3D})`,
+                              transformOrigin: 'center center',
+                              transition: isDragging3D ? 'none' : 'transform 0.2s',
+                              width: '100%',
+                              height: '100%',
+                              objectFit: 'contain',
+                              objectPosition: 'center',
+                              userSelect: 'none',
+                              WebkitUserSelect: 'none',
+                              pointerEvents: 'none',
+                            }}
+                            onError={(e) => {
+                              console.error('Failed to load 3D image');
+                              e.currentTarget.style.display = 'none';
+                            }}
+                            onDragStart={(e) => e.preventDefault()}
+                          />
+                        </div>
+
+                        {/* Comparison Slider - trong khung */}
+                        <div
+                          role="slider"
+                          aria-label="Compare 2D and 3D view"
+                          tabIndex={0}
+                          style={{
+                            position: 'absolute',
+                            top: 0,
+                            bottom: 0,
+                            left: `${comparisonSlider}%`,
+                            transform: 'translateX(-50%)',
+                            width: '24px',
+                            marginLeft: '-12px',
+                            cursor: 'ew-resize',
+                            zIndex: 10,
                             display: 'flex',
                             alignItems: 'center',
                             justifyContent: 'center',
-                            boxShadow: '0 2px 8px rgba(0,0,0,0.2)',
+                          }}
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            const container = e.currentTarget.parentElement as HTMLElement;
+                            const handleMove = (moveEvent: MouseEvent) => {
+                              const rect = container?.getBoundingClientRect();
+                              if (rect) {
+                                const percent = ((moveEvent.clientX - rect.left) / rect.width) * 100;
+                                setComparisonSlider(Math.max(0, Math.min(100, percent)));
+                              }
+                            };
+                            const handleUp = () => {
+                              document.removeEventListener('mousemove', handleMove);
+                              document.removeEventListener('mouseup', handleUp);
+                            };
+                            document.addEventListener('mousemove', handleMove);
+                            document.addEventListener('mouseup', handleUp);
                           }}
                         >
-                          <GripVertical size={20} className="text-zinc-600" />
+                          <div
+                            style={{
+                              width: '4px',
+                              height: '80%',
+                              background: 'rgba(255, 255, 255, 0.95)',
+                              boxShadow: '0 0 10px rgba(0,0,0,0.3)',
+                              borderRadius: '2px',
+                              pointerEvents: 'none',
+                            }}
+                          />
+                          <div
+                            style={{
+                              position: 'absolute',
+                              top: '50%',
+                              left: '50%',
+                              transform: 'translate(-50%, -50%)',
+                              width: '40px',
+                              height: '40px',
+                              borderRadius: '50%',
+                              background: 'white',
+                              border: '2px solid rgba(0,0,0,0.2)',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              boxShadow: '0 2px 8px rgba(0,0,0,0.2)',
+                              pointerEvents: 'none',
+                            }}
+                          >
+                            <GripVertical size={20} className="text-zinc-600" />
+                          </div>
                         </div>
-                      </div>
 
-                      {/* Labels */}
-                      <div
-                        style={{
-                          position: 'absolute',
-                          top: 12,
-                          left: 12,
-                          background: 'rgba(0, 0, 0, 0.7)',
-                          color: 'white',
-                          padding: '6px 12px',
-                          borderRadius: '6px',
-                          fontSize: '12px',
-                          fontWeight: 600,
-                          backdropFilter: 'blur(4px)',
-                        }}
-                      >
-                        2D Plan
-                      </div>
-                      <div
-                        style={{
-                          position: 'absolute',
-                          top: 12,
-                          right: 12,
-                          background: 'rgba(0, 0, 0, 0.7)',
-                          color: 'white',
-                          padding: '6px 12px',
-                          borderRadius: '6px',
-                          fontSize: '12px',
-                          fontWeight: 600,
-                          backdropFilter: 'blur(4px)',
-                        }}
-                      >
-                        3D View
+                        {/* Labels */}
+                        <div
+                          style={{
+                            position: 'absolute',
+                            top: 12,
+                            left: 12,
+                            background: 'rgba(0, 0, 0, 0.7)',
+                            color: 'white',
+                            padding: '6px 12px',
+                            borderRadius: '6px',
+                            fontSize: '12px',
+                            fontWeight: 600,
+                            backdropFilter: 'blur(4px)',
+                            zIndex: 5,
+                          }}
+                        >
+                          2D Plan
+                        </div>
+                        <div
+                          style={{
+                            position: 'absolute',
+                            top: 12,
+                            right: 12,
+                            background: 'rgba(0, 0, 0, 0.7)',
+                            color: 'white',
+                            padding: '6px 12px',
+                            borderRadius: '6px',
+                            fontSize: '12px',
+                            fontWeight: 600,
+                            backdropFilter: 'blur(4px)',
+                            zIndex: 5,
+                          }}
+                        >
+                          3D View
+                        </div>
                       </div>
                     </div>
                   );
@@ -1044,6 +1145,56 @@ export default function Visualizer() {
                           </button>
                         </div>
                       </div>
+                    </div>
+                  </div>
+                );
+              }
+
+              // Đang load ảnh 3D đã lưu (không tốn credit)
+              if (isLoadingSaved3D && sourceImageUrl) {
+                return (
+                  <div
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: '1fr 1fr',
+                      gap: '16px',
+                      width: '100%',
+                      height: '100%',
+                    }}
+                  >
+                    <div style={{ position: 'relative', height: '100%' }}>
+                      <img
+                        src={sourceImageUrl}
+                        alt={`2D floor plan of ${project.name || 'project'}`}
+                        className="render-img"
+                        style={{ height: '100%', objectFit: 'contain' }}
+                        onError={(e) => {
+                          const img = e.currentTarget;
+                          img.style.border = '2px solid red';
+                          img.style.opacity = '0.5';
+                        }}
+                      />
+                      <div
+                        style={{
+                          position: 'absolute',
+                          top: 12,
+                          left: 12,
+                          background: 'rgba(0, 0, 0, 0.7)',
+                          color: 'white',
+                          padding: '6px 12px',
+                          borderRadius: '6px',
+                          fontSize: '12px',
+                          fontWeight: 600,
+                          backdropFilter: 'blur(4px)',
+                        }}
+                      >
+                        2D Plan
+                      </div>
+                    </div>
+                    <div className="render-placeholder">
+                      <Loader2 className="w-8 h-8 animate-spin text-primary mb-4" />
+                      <p className="text-zinc-700 font-medium">Loading saved 3D view...</p>
+                      <p className="text-zinc-500 text-sm mt-2">No credits used</p>
                     </div>
                   </div>
                 );

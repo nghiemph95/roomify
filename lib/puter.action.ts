@@ -1,5 +1,6 @@
 import puter from '@heyputer/puter.js';
 import type { AuthUser } from '@heyputer/puter.js';
+import { PUTER_WORKER_URL } from './constants';
 import { getOrCreateHostingConfig, uploadImageToHosting } from './puter.hosting';
 import { isHostedUrl } from './utils';
 
@@ -45,6 +46,120 @@ export const isSignedIn = (): boolean => {
 export const getUser = async (): Promise<AuthUser | null> => {
   if (!puter.auth.isSignedIn()) return null;
   return puter.auth.getUser();
+};
+
+/**
+ * Lấy danh sách projects từ Puter Worker (GET /api/projects/list).
+ * Cần đăng nhập và đã cấu hình VITE_PUTER_WORKER_URL.
+ *
+ * @returns Promise<DesignItem[]> - Mảng projects, hoặc [] nếu chưa đăng nhập / không có worker URL / lỗi
+ */
+export const getProjects = async (): Promise<DesignItem[]> => {
+  if (!puter.auth.isSignedIn()) {
+    return [];
+  }
+
+  const baseUrl = PUTER_WORKER_URL?.replace(/\/$/, '');
+  if (!baseUrl) {
+    console.warn(
+      '[getProjects] VITE_PUTER_WORKER_URL chưa có. Thêm vào .env.local rồi restart dev server (npm run dev).'
+    );
+    return [];
+  }
+
+  try {
+    const response = await puter.workers.exec(`${baseUrl}/api/projects/list`, { method: 'GET' });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      console.warn('getProjects worker error:', response.status, err);
+      return [];
+    }
+    const data = (await response.json()) as { projects?: DesignItem[] };
+    return Array.isArray(data?.projects) ? data.projects : [];
+  } catch (e) {
+    console.error('getProjects failed', e);
+    return [];
+  }
+};
+
+/**
+ * Lấy một project theo id từ Puter Worker (GET /api/projects/get?id=...).
+ * Cần đăng nhập và đã cấu hình VITE_PUTER_WORKER_URL.
+ *
+ * @param id - Project id
+ * @returns Promise<DesignItem | null> - Project hoặc null nếu không tìm thấy / chưa đăng nhập / lỗi
+ */
+export const getProject = async (id: string): Promise<DesignItem | null> => {
+  if (!puter.auth.isSignedIn() || !id) {
+    return null;
+  }
+
+  const baseUrl = PUTER_WORKER_URL?.replace(/\/$/, '');
+  if (!baseUrl) {
+    console.warn(
+      '[getProject] VITE_PUTER_WORKER_URL chưa có. Thêm vào .env.local rồi restart dev server (npm run dev).'
+    );
+    return null;
+  }
+
+  try {
+    const response = await puter.workers.exec(
+      `${baseUrl}/api/projects/get?id=${encodeURIComponent(id)}`,
+      { method: 'GET' }
+    );
+    if (!response.ok) {
+      if (response.status === 404) return null;
+      const err = await response.json().catch(() => ({}));
+      console.warn('getProject worker error:', response.status, err);
+      return null;
+    }
+    const data = (await response.json()) as { project?: DesignItem };
+    return data?.project ?? null;
+  } catch (e) {
+    console.error('getProject failed', e);
+    return null;
+  }
+};
+
+/**
+ * Cập nhật project (ghi đè qua worker POST /api/projects/save).
+ * Dùng khi cập nhật field mới (vd. image3D sau khi generate 3D) mà không tạo project mới.
+ *
+ * @param project - Full DesignItem (có thể đã merge thêm image3D, ...)
+ * @returns Promise<DesignItem | null> - project đã lưu hoặc null nếu lỗi
+ */
+export const updateProject = async (
+  project: DesignItem
+): Promise<DesignItem | null> => {
+  if (!puter.auth.isSignedIn() || !project?.id) {
+    return null;
+  }
+
+  const baseUrl = PUTER_WORKER_URL?.replace(/\/$/, '');
+  if (!baseUrl) {
+    console.warn(
+      '[updateProject] VITE_PUTER_WORKER_URL chưa có. Thêm vào .env.local rồi restart dev server (npm run dev).'
+    );
+    return null;
+  }
+
+  try {
+    const response = await puter.workers.exec(`${baseUrl}/api/projects/save`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project }),
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      console.warn('updateProject worker save error:', response.status, err);
+      return null;
+    }
+    const data = (await response.json()) as { project?: DesignItem };
+    return data?.project ?? project;
+  } catch (e) {
+    console.error('Failed to update project', e);
+    return null;
+  }
 };
 
 /**
@@ -117,11 +232,11 @@ export const createProject = async ({
   const hostedSource =
     projectId && item.sourceImage
       ? await uploadImageToHosting({
-          hosting,
-          url: item.sourceImage,
-          projectId,
-          label: 'source',
-        })
+        hosting,
+        url: item.sourceImage,
+        projectId,
+        label: 'source',
+      })
       : null;
 
   // BƯỚC 4: Upload rendered image lên hosting (nếu có)
@@ -132,11 +247,11 @@ export const createProject = async ({
   const hostedRender =
     projectId && item.renderedImage
       ? await uploadImageToHosting({
-          hosting,
-          url: item.renderedImage,
-          projectId,
-          label: 'rendered',
-        })
+        hosting,
+        url: item.renderedImage,
+        projectId,
+        label: 'rendered',
+      })
       : null;
 
   // BƯỚC 5a: Resolve source image URL
@@ -163,9 +278,10 @@ export const createProject = async ({
 
   // BƯỚC 6: Validate resolvedSource
   // Source image là bắt buộc → nếu không có resolvedSource thì project không hợp lệ
-  // → Log warning và return null (không save project)
   if (!resolvedSource) {
-    console.warn('Failed to host source image, skipping save.');
+    console.warn(
+      'createProject: failed to resolve source image (hosting may be null or upload failed). Check sign-in and hosting config.'
+    );
     return null;
   }
 
@@ -181,24 +297,30 @@ export const createProject = async ({
     renderedImage: resolvedRender,
   };
 
-  // BƯỚC 8: Lưu project vào KV store
-  // Key: project:{projectId} để dễ query và organize
-  // Value: payload (DesignItem với resolved URLs)
+  // BƯỚC 8: Lưu project qua Puter Worker (cùng cách getProjects dùng worker để list)
+  // Gọi POST /api/projects/save với payload → worker lưu KV với prefix roomify_project_
+  const baseUrl = PUTER_WORKER_URL?.replace(/\/$/, '');
+  if (!baseUrl) {
+    console.warn(
+      '[createProject] VITE_PUTER_WORKER_URL chưa có. Thêm vào .env.local rồi restart dev server (npm run dev).'
+    );
+    return null;
+  }
   try {
-    // Call the Puter worker to store project in kv
-    // Lưu project vào KV store với key format: "project:{projectId}"
-    // → Dễ dàng query và list projects sau này
-    await puter.kv.set(`project:${projectId}`, payload);
+    const response = await puter.workers.exec(`${baseUrl}/api/projects/save`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project: payload }),
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      console.warn('createProject worker save error:', response.status, err);
+      return null;
+    }
 
-    // Return payload với resolved URLs
-    return payload;
+    const data = (await response.json()) as { project?: DesignItem | null };
+    return data?.project || null;
   } catch (e) {
-    // XỬ LÝ LỖI:
-    // Các trường hợp có thể xảy ra lỗi:
-    // - KV store không accessible
-    // - Network error
-    // - Permission denied
-    // → Log error để debug và return null
     console.error('Failed to save project', e);
     return null;
   }

@@ -20,6 +20,8 @@ interface DesignItem {
   renderedImage?: string | null;
   renderedPath?: string | null;
   publicPath?: string | null;
+  /** URL ảnh 3D đã generate (hosted), dùng để không phải generate lại khi mở lại project */
+  image3D?: string | null;
   timestamp: number;
   ownerId?: string | null;
   sharedBy?: string | null;

@@ -478,7 +478,7 @@ export const uploadImageToHosting = async ({
   hosting: HostingConfig | null;
   url: string;
   projectId: string;
-  label: 'source' | 'rendered';
+  label: 'source' | 'rendered' | 'image3d';
 }): Promise<HostedAsset | null> => {
   // BƯỚC 1: Validate input
   // Nếu không có hosting config hoặc URL → không thể upload
@@ -497,27 +497,18 @@ export const uploadImageToHosting = async ({
 
   try {
     // BƯỚC 3: Resolve image thành blob
-    // Có 2 cách tùy thuộc vào label:
+    // Tùy label: rendered → PNG qua canvas; source / image3d → fetch blob (data URL hoặc blob URL)
 
     let resolved: { blob: Blob; contentType: string } | null = null;
 
-    if (label === 'rendered') {
-      // Nếu là rendered image → convert sang PNG blob
-      // Lý do: Đảm bảo format nhất quán cho rendered images
-      // imageUrlToPngBlob() sẽ:
-      // - Load image vào canvas
-      // - Convert sang PNG format
-      // - Return PNG blob
+    if (label === 'rendered' || label === 'image3d') {
+      // rendered / image3d: convert sang PNG qua canvas (blob URL từ AI ổn định, format thống nhất)
       const pngBlob = await imageUrlToPngBlob(url);
       if (pngBlob) {
         resolved = { blob: pngBlob, contentType: 'image/png' };
       }
     } else {
-      // Nếu là source image → fetch blob từ URL (giữ nguyên format)
-      // fetchBlobFromUrl() sẽ:
-      // - Nếu là data URL → parse thành blob
-      // - Nếu là external URL → fetch từ network
-      // - Return blob với contentType từ response headers
+      // source: fetch blob từ URL (data URL hoặc external URL)
       resolved = await fetchBlobFromUrl(url);
     }
 
